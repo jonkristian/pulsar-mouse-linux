@@ -151,3 +151,13 @@ class PulsarX2CrazyLight(PulsarNordic):
     # 0.7 mm is stored as 0x03 — it was added after 1 mm and 2 mm, so the
     # codes are not in physical order.
     _LOD_CODES = {1: 0x01, 2: 0x02, 0.7: 0x03}
+
+    # Fusion writes the sleep timeout to 0xAD as well as 0xB7 on this mouse,
+    # always with the same value, in all three captures (#7) - which is
+    # where set_autosleep()'s mirroring came from, and the only mouse it has
+    # ever been measured on.  See PulsarNordic._AUTOSLEEP_MIRROR for why the
+    # base class no longer assumes it.  The CrazyLight Wired, the Noctua and
+    # the Areson X2 all derive from this class and so keep the mirror: it is
+    # what they have always done, their register maps were validated against
+    # this one's, and nothing says it is wrong for them.
+    _AUTOSLEEP_MIRROR = True

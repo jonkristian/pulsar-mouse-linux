@@ -17,6 +17,9 @@ import unittest
 from pulsar_mouse import cli
 from pulsar_mouse.base import PulsarDevice
 from pulsar_mouse.drivers.nordic import (
+    ADDR_AUTOSLEEP,
+    ADDR_AUTOSLEEP_ALT,
+    CMD_MEM_SET,
     KM_RIGHT_FLANK,
     MODELS_BY_MID,
     PulsarNordic,
@@ -25,8 +28,37 @@ from pulsar_mouse.drivers.nordic import (
 XLITE_V3, X2A_WIRELESS, X2_V2, X2_V2_MINI = 0x07, 0x08, 0x0A, 0x0B
 
 
-def mouse(mid=None, deaf=False):
-    """A Nordic mouse whose handshake answers with `mid`, or not at all."""
+def crazylight():
+    """The one mouse 0xAD mirroring was measured on."""
+    from pulsar_mouse.drivers.x2_crazylight import PulsarX2CrazyLight
+
+    class Scripted(PulsarX2CrazyLight):
+        def __init__(self):
+            super().__init__()
+            self._fd = 17
+            self._mem = {addr: 0 for addr in range(0x00, 0xD0)}
+            self.sent = []
+
+        def _send(self, packet):
+            self.sent.append(bytes(packet))
+            self.last = packet
+
+        def _recv(self, timeout_ms=2000):
+            body = bytearray(16)
+            body[0], body[1] = 0x08, self.last[1]
+            return bytes(body) + bytes([self._checksum(*body)])
+
+        def _tunable_profile(self, profile):
+            pass
+
+    return Scripted()
+
+
+def mouse(mid=None, deaf=False, status=0x00, cid=0x06):
+    """A Nordic mouse whose handshake answers with `mid`, or not at all.
+
+    `status` is byte 2 of the reply, which is 0 when the mouse answered.
+    """
 
     class Scripted(PulsarNordic):
         def __init__(self):
@@ -34,8 +66,10 @@ def mouse(mid=None, deaf=False):
             self._fd = 17
             self._mem = {addr: 0x01 for addr in range(0x60, 0x90)}
             self.handshakes = 0
+            self.sent = []
 
         def _send(self, packet):
+            self.sent.append(bytes(packet))
             self.last = packet
 
         def _recv(self, timeout_ms=2000):
@@ -44,10 +78,14 @@ def mouse(mid=None, deaf=False):
                 raise IOError('asleep')
             body = bytearray(16)
             body[0], body[1] = 0x08, self.last[1]
-            body[10], body[11] = 0x06, mid
+            body[2] = status
+            body[10], body[11] = cid, mid or 0
             return bytes(body) + bytes([self._checksum(*body)])
 
         def _ensure_profile(self, profile):
+            pass
+
+        def _tunable_profile(self, profile):
             pass
 
     return Scripted()
@@ -85,10 +123,30 @@ class AbsentButtonTests(unittest.TestCase):
         for btn_id in device.capabilities.buttons.values():
             self.assertIsNotNone(device.get_button(btn_id, 1))
 
-    def test_an_unknown_mid_keeps_all_eight(self):
+    def test_a_mid_newer_than_the_table_is_taken_as_six_button(self):
+        # Four of the 21 are KM=14 and all four are known, so a model this
+        # table has never heard of is likelier to be another KM=10 - and
+        # offering two buttons that are not there is the worse mistake.
         device = mouse(0x7F)
-        for btn_id in device.capabilities.buttons.values():
-            self.assertIsNotNone(device.get_button(btn_id, 1))
+        for btn_id in self.ids(device, *KM_RIGHT_FLANK):
+            with self.assertRaises(NotImplementedError):
+                device.get_button(btn_id, 1)
+        self.assertIsNotNone(
+            device.get_button(device.capabilities.buttons['dpi'], 1))
+
+    def test_a_refused_answer_is_not_a_model(self):
+        # Byte 2 is a status; without checking it, a refusal came back as
+        # cid=0 mid=0 and was remembered as a model for the whole session.
+        for refusal in (mouse(0x07, status=0x01), mouse(0x00), mouse(0x07, cid=0)):
+            for btn_id in refusal.capabilities.buttons.values():
+                self.assertIsNotNone(refusal.get_button(btn_id, 1))
+            self.assertIsNone(refusal.model_name())
+
+    def test_a_refusal_is_asked_again(self):
+        device = mouse(0x07, status=0x01)
+        for _ in range(3):
+            device.get_button(device.capabilities.buttons['thumb3'], 1)
+        self.assertEqual(device.handshakes, 3)
 
     def test_the_model_is_asked_once(self):
         device = mouse(X2A_WIRELESS)
@@ -157,8 +215,16 @@ class RefineTests(unittest.TestCase):
         self.assertFalse(device.refine_capabilities())
         self.assertEqual(device.capabilities, PulsarNordic.capabilities)
 
-    def test_an_unknown_mid_is_left_as_the_family(self):
+    def test_an_unknown_mid_loses_the_flank_but_keeps_the_name(self):
         device = mouse(0x7F)
+        self.assertTrue(device.refine_capabilities())
+        caps = device.capabilities
+        self.assertEqual(caps.name, PulsarNordic.capabilities.name)
+        self.assertNotIn('thumb3', caps.buttons)
+        self.assertEqual(len(caps.buttons), 6)
+
+    def test_a_refusal_is_left_as_the_family(self):
+        device = mouse(0x07, status=0x01)
         self.assertFalse(device.refine_capabilities())
         self.assertEqual(device.capabilities, PulsarNordic.capabilities)
 
@@ -200,11 +266,47 @@ class ButtonListTests(unittest.TestCase):
         self.assertEqual(len(data['buttons']), 8)
 
 
+class AutosleepMirrorTests(unittest.TestCase):
+    """0xAD is only written where Fusion has been seen writing it (#30)."""
+
+    def written(self, device, seconds=60):
+        device.sent = []
+        device.set_autosleep(seconds)
+        return sorted({(p[3] << 8) | p[4] for p in device.sent
+                       if p[1] == CMD_MEM_SET})
+
+    def test_the_family_writes_only_the_byte_fusion_agreed_with(self):
+        # @bluesceada's Xlite V3 held different values at 0xAD and 0xB7, and
+        # Fusion's own UI showed 0xB7's.
+        self.assertEqual(self.written(mouse(XLITE_V3)), [ADDR_AUTOSLEEP])
+
+    def test_the_crazylight_still_writes_both(self):
+        # Measured there: Fusion writes both, with the same value.
+        light = crazylight()
+        self.assertEqual(self.written(light),
+                         [ADDR_AUTOSLEEP_ALT, ADDR_AUTOSLEEP])
+
+    def test_the_value_is_tenths_of_a_minute_either_way(self):
+        for device in (mouse(XLITE_V3), crazylight()):
+            device.sent = []
+            device.set_autosleep(180)
+            wrote = [p for p in device.sent if p[1] == CMD_MEM_SET]
+            self.assertEqual(wrote[-1][6], 18, type(device).__mro__[1].__name__)
+
+
 class CfgIniTests(unittest.TestCase):
     def test_the_table_is_the_one_from_the_cfg_ini(self):
+        # All 21 models in Fusion Wireless Mice 1.3.3's Cfg.ini, and the
+        # four that have two flanks of thumb buttons.
+        self.assertEqual(sorted(MODELS_BY_MID), list(range(0x01, 0x16)))
         self.assertEqual(
-            {mid: km for mid, (_name, km) in MODELS_BY_MID.items()},
-            {0x07: 10, 0x08: 14, 0x0A: 10, 0x0B: 10})
+            sorted(mid for mid, (_n, km) in MODELS_BY_MID.items() if km == 14),
+            [0x08, 0x09, 0x12, 0x13])
+        self.assertTrue(all(km in (10, 14)
+                            for _n, km in MODELS_BY_MID.values()))
+        # The file really does name 0x12/0x14 and 0x13/0x15 the same.
+        self.assertEqual(MODELS_BY_MID[0x12][0], MODELS_BY_MID[0x14][0])
+        self.assertEqual(MODELS_BY_MID[0x13][0], MODELS_BY_MID[0x15][0])
 
 
 if __name__ == '__main__':

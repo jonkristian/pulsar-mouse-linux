@@ -147,25 +147,50 @@ ADDR_LED_ENABLED       = 0x52
 # Buttons: 4 bytes each (mode, arg1, arg2, checksum)
 ADDR_BUTTON_BASE      = 0x60
 BUTTON_SIZE           = 4
-# What a CID/MID pair means, from Fusion's own Cfg.ini (@bluesceada, #30).
-# CID is 6 for every mouse on these two PIDs; the MID picks the model, and
-# with it the KM - the key matrix, which is how many buttons the mouse has.
-# Only 0x07 has been read off hardware so far (an Xlite V3, whose CheckPsd
-# answered cid=6 mid=7 and whose right-hand slots hold what a six-button
-# mouse keeps there); the other three come from that file.
+# What a CID/MID pair means, from the Cfg.ini that ships with Fusion
+# Wireless Mice - @bluesceada found the file and @f-o-o-g-s read all 21
+# models out of 1.3.3's copy (#30).  CID is 6 for every one of them; the MID
+# picks the model, and with it the KM - the key matrix, which is how many
+# buttons the mouse has.  KM lines up with what Fusion lets you remap in the
+# same file: every KM=14 model has rcKey1-7 and every KM=10 model rcKey1-5.
+#
+# Only 0x07 has been read off hardware (an Xlite V3, whose CheckPsd answered
+# cid=6 mid=7 and whose right-hand slots hold what a six-button mouse keeps
+# there).  The duplicated names at 0x12/0x14 and 0x13/0x15 are in the file
+# that way, one KM=14 and one KM=10 each.
 MODELS_BY_MID = {
+    0x01: ('Pulsar Xlite Wireless', 10),
+    0x02: ('Pulsar Xlite Mini Wireless', 10),
+    0x03: ('Pulsar X2 Mini Wireless', 10),
+    0x04: ('Pulsar X2 Wireless', 10),
+    0x05: ('Pulsar X2 Mini Bruce Lee', 10),
+    0x06: ('Pulsar X2 Bruce Lee', 10),
     0x07: ('Pulsar Xlite V3', 10),
     0x08: ('Pulsar X2A Wireless', 14),
-    0x0A: ('Pulsar X2 V2 Wireless', 10),
-    0x0B: ('Pulsar X2 V2 Mini Wireless', 10),
+    0x09: ('Pulsar X2A Mini Wireless', 14),
+    0x0A: ('Pulsar X2V2 Wireless', 10),
+    0x0B: ('Pulsar X2V2 Mini Wireless', 10),
+    0x0C: ('Pulsar X2H Wireless', 10),
+    0x0D: ('Pulsar X2H Mini Wireless', 10),
+    0x0E: ('Pulsar Xlite V3 Mini', 10),
+    0x0F: ('Pulsar Xlite V3 Large', 10),
+    0x10: ('Pulsar Xlite V3 Custom Optical', 10),
+    0x11: ('Pulsar Xlite V3 Custom Mech', 10),
+    0x12: ('Pulsar X2 Custom Optical', 14),
+    0x13: ('Pulsar X2 Custom Mech', 14),
+    0x14: ('Pulsar X2 Custom Optical', 10),
+    0x15: ('Pulsar X2 Custom Mech', 10),
 }
 
-# The pair a KM=10 mouse does not have.  0x78 and 0x7C are the X2A
-# Wireless's right flank; on the other three they hold something else - an
-# Xlite V3 reads 02 02 and 02 03 there, DPI-type actions, byte for byte what
-# the X2 CrazyLight keeps in them (#30).  So a mouse the MID says is
-# six-button refuses both, rather than reading a binding that is not one and
-# writing over whatever its firmware uses them for.
+# A MID that answered but is not in the table above is taken as six-button.
+# Four of the 21 are KM=14 and they are all known, so a model newer than
+# that file is far likelier to be another KM=10 - and the two ways of being
+# wrong are not equal: offering two buttons that are not there writes into
+# slots the firmware uses for something else, where hiding two that are
+# leaves them unreachable until this table grows a row.  A mouse that will
+# not say at all is a different case and keeps all eight; see _model_km().
+_KM_UNKNOWN_MID = 10
+
 KM_RIGHT_FLANK = ('thumb3', 'thumb4')
 
 BUTTON_ADDRS = {
@@ -250,6 +275,14 @@ _SONIX_MOUSE_TO_NORDIC = {v: k for k, v in _NORDIC_MOUSE_TO_SONIX.items()}
 
 from pulsar_mouse.hid import (BTN_TYPE_DISABLED, BTN_TYPE_MOUSE, BTN_TYPE_KEYBOARD,
                                BTN_TYPE_DPI, BTN_TYPE_PROFILE)
+
+
+def _model_km(mid):
+    """The key matrix for a MID: None when the mouse would not say."""
+    if mid is None:
+        return None
+    model = MODELS_BY_MID.get(mid)
+    return model[1] if model else _KM_UNKNOWN_MID
 
 
 def _shortcut_addr(btn_name: str, addrs: dict = BUTTON_ADDRS) -> int:
@@ -383,7 +416,14 @@ class PulsarNordic(PulsarDevice):
         # and the protocol is too; the Xlite V3 is named here so its owners
         # aren't told they have an X2A (#30).
         name='Pulsar X2A Wireless / Xlite V3',
-        vid_pid_pairs=[(0x3554, 0xF507), (0x3554, 0xF508)],
+        # F509 is in Fusion's own Cfg.ini beside the other two and has
+        # never been seen on a bus here (@f-o-o-g-s, #30).  Claimed anyway:
+        # the alternative is telling whoever has one that no supported mouse
+        # is plugged in, and the identity read says which model it is
+        # whatever the PID.  If it turns out to be the 4K link its owner will
+        # find polling rates missing from the list rather than anything
+        # written wrong.
+        vid_pid_pairs=[(0x3554, 0xF507), (0x3554, 0xF508), (0x3554, 0xF509)],
         interface_num=1,
         report_size=17,
         num_profiles=1,
@@ -768,6 +808,15 @@ class PulsarNordic(PulsarDevice):
         resp = self._command(CMD_HANDSHAKE, b5=0x08,
                              b6=nonce[0], b7=nonce[1],
                              b8=nonce[2], b9=nonce[3])
+        # Byte 2 is a status: 0 in every reply Fusion got, 1 in the one the
+        # zero-nonce probe got, and the X2 CrazyLight capture has it 0
+        # throughout (@f-o-o-g-s, #30).  _command() only matches the command
+        # byte, so without this a refusal would be read as cid=0 mid=0 and
+        # remembered as a model.
+        if resp[2] != 0x00 or not resp[10] or not resp[11]:
+            raise IOError(
+                f"the mouse would not say what it is: status "
+                f"0x{resp[2]:02x}, cid={resp[10]}, mid={resp[11]}")
         return resp[10], resp[11]
 
     # ── Active profile ───────────────────────────────────────────────────
@@ -1051,11 +1100,12 @@ class PulsarNordic(PulsarDevice):
         are not there - get_button()/set_button() refuse them in any case,
         which is what protects the CLI and an import.
         """
-        model = MODELS_BY_MID.get(self._model_mid())
-        if model is None:
-            return False        # it would not say, or a MID nobody has seen
-        name, km = model
-        changes = {'name': name}
+        mid = self._model_mid()
+        km = _model_km(mid)
+        if km is None:
+            return False                    # it would not say
+        model = MODELS_BY_MID.get(mid)
+        changes = {'name': model[0]} if model else {}
         if km == 10:
             caps = self.capabilities
             changes['buttons'] = {n: i for n, i in caps.buttons.items()
@@ -1080,12 +1130,14 @@ class PulsarNordic(PulsarDevice):
         """
         if name not in KM_RIGHT_FLANK:
             return
-        model = MODELS_BY_MID.get(self._model_mid())
-        if model is None or model[1] != 10:
-            return      # an X2A Wireless, or a mouse that would not say
+        mid = self._model_mid()
+        if _model_km(mid) != 10:
+            return      # a KM=14 mouse, or one that would not say
+        model = MODELS_BY_MID.get(mid)
+        whose = f"a {model[0]}" if model else f"this mouse (mid 0x{mid:02x})"
         raise NotImplementedError(
-            f"a {model[0]} has no {name}: it has {model[1] // 2} buttons, "
-            f"and that slot holds something else")
+            f"{whose} has no {name}: it has five remappable buttons, and "
+            f"that slot holds something else")
 
     def get_button(self, btn_id: int, profile: int) -> tuple[int, int, int]:
         self._ensure_profile(profile)
@@ -1219,13 +1271,27 @@ class PulsarNordic(PulsarDevice):
         self._tunable_profile(profile)
         return self._mem.get(ADDR_AUTOSLEEP, 0) * 10
 
+    # Whether 0xAD carries this setting too.  Fusion writes both, with the
+    # same value, in every X2 CrazyLight capture - so that driver says True
+    # - but this base class no longer assumes it of the rest.  @bluesceada's
+    # Xlite V3 held 0x06 at 0xAD and 0x12 at 0xB7 while Fusion showed three
+    # minutes, which is 0xB7's; and @f-o-o-g-s pointed out that the
+    # CrazyLight capture is a different app (DRV 1.31 against the 1.3.3 that
+    # lists these models, which does not list the CrazyLight at all) and
+    # that its own en/text.xml has strings for both an "Auto Sleep" and a
+    # "Dormancy time", which would be two timers (#30).  So writing 0xAD
+    # here is writing over something nobody has identified.  A capture of
+    # the timer being changed in Fusion would settle it.
+    _AUTOSLEEP_MIRROR = False
+
     def set_autosleep(self, seconds: int, profile=None) -> None:
         """Set the auto-sleep timeout.  Stored in units of 10 s."""
         if seconds % 10 or not 0 <= seconds <= 2550:
             raise ValueError("Auto-sleep must be 0–2550 s in steps of 10")
         self._tunable_profile(profile)
         units = seconds // 10
-        self._write_value(ADDR_AUTOSLEEP_ALT, units)
+        if self._AUTOSLEEP_MIRROR:
+            self._write_value(ADDR_AUTOSLEEP_ALT, units)
         self._write_value(ADDR_AUTOSLEEP, units)
 
     # ── Nordic-specific: turbo mode ──────────────────────────────────────
