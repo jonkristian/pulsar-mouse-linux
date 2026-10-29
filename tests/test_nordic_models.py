@@ -294,6 +294,69 @@ class AutosleepMirrorTests(unittest.TestCase):
             self.assertEqual(wrote[-1][6], 18, type(device).__mro__[1].__name__)
 
 
+class SleepControlTests(unittest.TestCase):
+    """The family's sleep timer, measured off Fusion's own slider (#30)."""
+
+    def test_the_family_offers_one_at_all(self):
+        # It had none: the wrappers the CLI and GUI look for lived in the
+        # X2 CrazyLight driver, two models away.
+        device = mouse(XLITE_V3)
+        self.assertEqual(device.capabilities.power_saving_range, (10, 600, 10))
+        self.assertTrue(hasattr(device, 'set_power_saving_timeout'))
+
+    def test_both_ends_are_the_ones_fusion_wrote(self):
+        device = mouse(XLITE_V3)
+        device._mem[ADDR_AUTOSLEEP] = 0x06      # a minute, as read
+        for seconds, stored in ((10, 0x01), (600, 0x3c), (120, 0x0c)):
+            device.sent = []
+            device.set_power_saving_timeout(seconds)
+            wrote = [p for p in device.sent if p[1] == CMD_MEM_SET]
+            self.assertEqual((wrote[-1][3] << 8) | wrote[-1][4], ADDR_AUTOSLEEP)
+            self.assertEqual(wrote[-1][6], stored)
+
+    def test_a_value_outside_the_range_is_left_where_it_is(self):
+        # A mouse holding something the slider cannot show comes back
+        # clamped, and writing that clamp would quietly replace it.  Half an
+        # hour, which this family's slider stops short of.
+        device = mouse(XLITE_V3)
+        device._mem[ADDR_AUTOSLEEP] = 0xb4      # 1800 s
+        device.sent = []
+        device.set_power_saving_timeout(600)    # the clamp, unchosen
+        self.assertEqual([p for p in device.sent if p[1] == CMD_MEM_SET], [])
+        device.set_power_saving_timeout(120)    # a real choice
+        self.assertTrue([p for p in device.sent if p[1] == CMD_MEM_SET])
+
+    def test_past_either_end_is_refused(self):
+        device = mouse(XLITE_V3)
+        device._mem[ADDR_AUTOSLEEP] = 0x06
+        for seconds in (0, 5, 610, 1800):
+            with self.assertRaises(ValueError):
+                device.set_power_saving_timeout(seconds)
+
+    def test_the_crazylight_keeps_its_own_half_hour(self):
+        self.assertEqual(crazylight().capabilities.power_saving_range,
+                         (10, 1800, 10))
+
+
+class ProfileSwitchTests(unittest.TestCase):
+    def test_a_switch_the_mouse_refused_raises(self):
+        # Byte 2 is a status; a switch that did not take would leave every
+        # read after it addressing the profile the mouse is still on.
+        device = mouse(XLITE_V3, status=0x01)
+        device._home_profile = 1
+        with self.assertRaisesRegex(IOError, 'would not switch'):
+            device._switch_to(2)
+
+    def test_an_accepted_switch_goes_through(self):
+        device = mouse(XLITE_V3)
+        device._mem_read_all = lambda: None
+        device._drain = lambda: None
+        device._switch_to(2)
+        self.assertEqual(device._profile, 2)
+        switch = [p for p in device.sent if p[1] == 0x0F][-1]
+        self.assertEqual(switch[6], 1)          # 0-based on the wire
+
+
 class CfgIniTests(unittest.TestCase):
     def test_the_table_is_the_one_from_the_cfg_ini(self):
         # All 21 models in Fusion Wireless Mice 1.3.3's Cfg.ini, and the

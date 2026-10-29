@@ -215,20 +215,22 @@ BUTTON_ADDRS = {
 
 ADDR_DEBOUNCE         = 0xA9
 ADDR_MOTION_SYNC      = 0xAB
-# Fusion writes the auto-sleep timeout to 0xAD *and* 0xB7 (X2 CL capture),
-# always with the same value.  set_autosleep() mirrors that.
+# Fusion writes the auto-sleep timeout to 0xAD *and* 0xB7 in the X2
+# CrazyLight capture, always with the same value - which is where the
+# mirroring came from, and the only mouse it holds for.  On this family
+# 0xAD is not the timeout: it read 06 in every dump and capture in #30,
+# including a profile whose timer was 10 s, where 0xB7 read 01.  Still
+# unidentified; the app has a "Dormancy time" string as well as an "Auto
+# Sleep" one, which would fit a second timer.
 ADDR_AUTOSLEEP_ALT    = 0xAD
 ADDR_ANGLE_SNAP       = 0xAF
 ADDR_RIPPLE_CONTROL   = 0xB1
 ADDR_TURBO_MODE       = 0xB5
-# The two can disagree, where every X2 CL capture has them equal:
-# @bluesceada's Xlite V3 read 0x06 at 0xAD and 0x12 at 0xB7, 60 s against
-# 180 s (#30).  Fusion showed 3 minutes for that same mouse, so this one is
-# the sleep timeout and 0xAD is something else on this model - which makes
-# set_autosleep()'s mirroring a write over whatever that is.  Left as it is
-# because mirroring is what the capture shows Fusion doing, and nothing says
-# which model's behaviour is the odd one; a Fusion capture of an Xlite V3
-# with the timer changed would say.
+# The sleep timeout on this family, confirmed by watching Fusion move it
+# (#30): both of its writes went here and nowhere else, 3c for 10 minutes
+# and 0c for 2, and it has matched what Fusion showed every time - 12 for
+# 3 minutes, 06 for 1, 01 for 10 seconds.  Per profile: 06 on profile 1 and
+# 01 on profile 2 of the same mouse, in the same read.
 ADDR_AUTOSLEEP        = 0xB7
 
 # ── Encoding tables ─────────────────────────────────────────────────────────
@@ -449,6 +451,14 @@ class PulsarNordic(PulsarDevice):
         has_breathe_speed=True,
         breathe_speed_range=(1, 5),
         debounce_range=(0, 30),
+        # 0xB7 in units of 10 s, and Fusion's own slider gives the ends:
+        # @bluesceada's profile 2 sat at its minimum, 01, and a drag to the
+        # far end wrote 3c (@f-o-o-g-s read it off the capture, #30).  Its
+        # stops are not evenly spaced - three under a minute, then whole
+        # minutes - so a value between them, 90 s say, is untested rather
+        # than known good.  Without this the slider would offer the base
+        # class's 30-900 s, which is neither end of what this mouse takes.
+        power_saving_range=(10, 600, 10),
         has_stage_colors=True,
         button_labels={
             'left': 'Left Click', 'right': 'Right Click',
@@ -695,7 +705,10 @@ class PulsarNordic(PulsarDevice):
         """Discard unsolicited replies.
 
         A profile switch answers with the 0x0F echo *and* an 0x0A carrying the
-        profile count; leaving the extra report queued desynchronises every
+        profile-changed event (0x04 at byte 6, which is EVENT_PROFILE_CHANGED
+        and not a count of anything - it reads 04 on a four-profile mouse
+        either way, so nothing can be counted from it); leaving the extra
+        report queued desynchronises every
         later _command().
         """
         while True:
@@ -840,7 +853,17 @@ class PulsarNordic(PulsarDevice):
     def _switch_to(self, profile: int) -> None:
         """Load `profile` into the memory window.  Doesn't change which
         profile close() leaves the mouse on — see set_active_profile()."""
-        self._command(CMD_ACTIVE_PROFILE_SET, b5=0x01, b6=profile - 1)
+        resp = self._command(CMD_ACTIVE_PROFILE_SET, b5=0x01, b6=profile - 1)
+        # Byte 2 is a status, as it is on the handshake: 0 in both switches
+        # of the capture, and the X2 CrazyLight's traffic has it 0
+        # throughout (@f-o-o-g-s, #30).  Raising on anything else is the
+        # safer way round - a switch that did not take leaves every read and
+        # write after it addressing the profile the mouse is still on while
+        # calling it this one.
+        if resp[2] != 0x00:
+            raise IOError(
+                f"the mouse would not switch to profile {profile} "
+                f"(status byte 0x{resp[2]:02x})")
         self._drain()
         self._profile = profile
         self._mem_read_all()
@@ -1293,6 +1316,30 @@ class PulsarNordic(PulsarDevice):
         if self._AUTOSLEEP_MIRROR:
             self._write_value(ADDR_AUTOSLEEP_ALT, units)
         self._write_value(ADDR_AUTOSLEEP, units)
+
+    # Auto Sleep, as Fusion calls it, exposed through the same power-saving
+    # API the Feinmann driver uses so that the CLI and GUI pick it up.  Here
+    # rather than in x2_crazylight.py, where it was: the register is the
+    # family's and this family had no sleep control at all (#30).  Each
+    # driver's own power_saving_range says how far its slider goes - 10 min
+    # here, 30 on the CrazyLight.
+
+    def get_power_saving_timeout(self, profile=None) -> int:
+        return self.get_autosleep(profile)
+
+    def set_power_saving_timeout(self, seconds: int, profile=None) -> None:
+        lo, hi, step = self.capabilities.power_saving_range
+        stored = self.get_autosleep(profile)
+        # The trap the wired polling rate fell into: a stored value outside
+        # the exposed range comes back clamped in the GUI, and writing that
+        # clamp would silently replace it.  Leave it unless a different
+        # value was actually chosen.
+        if not lo <= stored <= hi and seconds == min(max(stored, lo), hi):
+            return
+        if not lo <= seconds <= hi or (seconds - lo) % step:
+            raise ValueError(
+                f"Power saving must be {lo}–{hi} s in steps of {step}")
+        self.set_autosleep(seconds, profile)
 
     # ── Nordic-specific: turbo mode ──────────────────────────────────────
 

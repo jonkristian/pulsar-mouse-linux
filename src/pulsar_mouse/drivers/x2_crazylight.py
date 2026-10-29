@@ -58,7 +58,10 @@ class PulsarX2CrazyLight(PulsarNordic):
         # colours (0x2C–0x4B), but slots 7 and 8 just repeat slot 6, so six
         # is the real maximum.
         max_dpi_stages=6,
-        # Command 0x0A answers a profile switch with the count: 0x04.
+        # Four from Fusion's own profile list, and every one of them read
+        # and written back byte for byte by @iamtherobin's verify run.  Not
+        # from the 0x0A that follows a switch: its byte 6 is the event code
+        # EVENT_PROFILE_CHANGED, which is also 0x04 (@f-o-o-g-s, #30).
         dpi_min=10,
         dpi_max=32000,
         dpi_step=10,
@@ -129,24 +132,6 @@ class PulsarX2CrazyLight(PulsarNordic):
         (3, 10, 201, None),    # steps of 100 DPI, to Fusion's 32000 ceiling
     )
 
-    # Auto Sleep, as Pulsar Fusion calls it, exposed through the same
-    # power-saving API the Feinmann driver uses, so the CLI and GUI pick it up.
-
-    def get_power_saving_timeout(self, profile=None) -> int:
-        return self.get_autosleep(profile)
-
-    def set_power_saving_timeout(self, seconds: int, profile=None) -> None:
-        lo, hi, step = self.capabilities.power_saving_range
-        stored = self.get_autosleep(profile)
-        # The trap the wired polling rate fell into: a stored value outside the
-        # exposed range comes back clamped in the GUI, and writing that clamp
-        # would silently replace it.  Leave it unless a different value was
-        # actually chosen.
-        if not lo <= stored <= hi and seconds == min(max(stored, lo), hi):
-            return
-        if not lo <= seconds <= hi or (seconds - lo) % step:
-            raise ValueError(f"Power saving must be {lo}–{hi} s in steps of {step}")
-        self.set_autosleep(seconds, profile)
 
     # 0.7 mm is stored as 0x03 — it was added after 1 mm and 2 mm, so the
     # codes are not in physical order.
