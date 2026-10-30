@@ -429,6 +429,12 @@ class PulsarNordic(PulsarDevice):
         interface_num=1,
         report_size=17,
         num_profiles=1,
+        # Four, and now cross-checked rather than inherited: every one of
+        # the 21 models in Fusion's Cfg.ini carries DM=4, with four values
+        # in its DPI= line and four colours in its DC= (@f-o-o-g-s, #30).
+        # That file has nothing to say about the profile count, which is why
+        # num_profiles above is still the one number here that is known to
+        # be wrong - see MODELS_BY_MID.
         max_dpi_stages=4,
         dpi_min=50,
         dpi_max=26000,
@@ -854,9 +860,9 @@ class PulsarNordic(PulsarDevice):
         """Load `profile` into the memory window.  Doesn't change which
         profile close() leaves the mouse on — see set_active_profile()."""
         resp = self._command(CMD_ACTIVE_PROFILE_SET, b5=0x01, b6=profile - 1)
-        # Byte 2 is a status, as it is on the handshake: 0 in both switches
-        # of the capture, and the X2 CrazyLight's traffic has it 0
-        # throughout (@f-o-o-g-s, #30).  Raising on anything else is the
+        # Byte 2 is a status, as it is on the handshake: 0 in all 218
+        # replies of the capture this came from, and in the X2 CrazyLight's
+        # traffic throughout (@f-o-o-g-s, #30).  Raising on anything else is the
         # safer way round - a switch that did not take leaves every read and
         # write after it addressing the profile the mouse is still on while
         # calling it this one.
